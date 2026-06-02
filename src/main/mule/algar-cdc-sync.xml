@@ -22,7 +22,7 @@
         <salesforce:subscribe-channel-listener
             config-ref="Salesforce_Config"
             streamingChannel="/data/AccountChangeEvent"
-            replayOption="ONLY_NEW" />
+            />
 
         <logger level="INFO"
             message="#['[CDC-Account] Evento recebido: ' ++ payload.ChangeEventHeader.changeType ++ ' - IDs: ' ++ payload.ChangeEventHeader.recordIds joinBy ', ']" />
@@ -36,11 +36,8 @@
                 <salesforce:salesforce-query>
                     SELECT Id, Name, Industry, Type, BillingCity, BillingState,
                            AnnualRevenue, Legacy_CRM_Id__c
-                    FROM Account WHERE Id = ':sfAccountId'
+                    FROM Account WHERE Id = '#[vars.sfAccountId]'
                 </salesforce:salesforce-query>
-                <salesforce:parameters>
-                    <salesforce:parameter key="sfAccountId" value="#[vars.sfAccountId]" />
-                </salesforce:parameters>
             </salesforce:query>
 
             <set-variable variableName="account" value="#[payload[0]]" />
@@ -141,7 +138,7 @@
         <salesforce:subscribe-channel-listener
             config-ref="Salesforce_Config"
             streamingChannel="/data/LeadChangeEvent"
-            replayOption="ONLY_NEW" />
+            />
 
         <logger level="INFO"
             message="#['[CDC-Lead] ' ++ payload.ChangeEventHeader.changeType ++ ' - ' ++ payload.ChangeEventHeader.recordIds joinBy ', ']" />
@@ -153,11 +150,8 @@
                 <salesforce:salesforce-query>
                     SELECT Id, FirstName, LastName, Email, Phone,
                            Company, Title, Status, Rating
-                    FROM Lead WHERE Id = ':sfLeadId'
+                    FROM Lead WHERE Id = '#[vars.sfLeadId]'
                 </salesforce:salesforce-query>
-                <salesforce:parameters>
-                    <salesforce:parameter key="sfLeadId" value="#[vars.sfLeadId]" />
-                </salesforce:parameters>
             </salesforce:query>
 
             <set-variable variableName="lead" value="#[payload[0]]" />
@@ -230,7 +224,7 @@
         <salesforce:subscribe-channel-listener
             config-ref="Salesforce_Config"
             streamingChannel="/data/ContactChangeEvent"
-            replayOption="ONLY_NEW" />
+            />
 
         <foreach collection="#[payload.ChangeEventHeader.recordIds]">
             <set-variable variableName="sfContactId" value="#[payload]" />
@@ -239,11 +233,8 @@
                 <salesforce:salesforce-query>
                     SELECT Id, FirstName, LastName, Email, Phone,
                            Title, AccountId, Department
-                    FROM Contact WHERE Id = ':sfContactId'
+                    FROM Contact WHERE Id = '#[vars.sfContactId]'
                 </salesforce:salesforce-query>
-                <salesforce:parameters>
-                    <salesforce:parameter key="sfContactId" value="#[vars.sfContactId]" />
-                </salesforce:parameters>
             </salesforce:query>
 
             <set-variable variableName="contact" value="#[payload[0]]" />
@@ -312,7 +303,7 @@
         <salesforce:subscribe-channel-listener
             config-ref="Salesforce_Config"
             streamingChannel="/data/OpportunityChangeEvent"
-            replayOption="ONLY_NEW" />
+            />
 
         <foreach collection="#[payload.ChangeEventHeader.recordIds]">
             <set-variable variableName="sfOppId" value="#[payload]" />
@@ -321,11 +312,8 @@
                 <salesforce:salesforce-query>
                     SELECT Id, Name, AccountId, StageName, Amount,
                            Probability, CloseDate, Type
-                    FROM Opportunity WHERE Id = ':sfOppId'
+                    FROM Opportunity WHERE Id = '#[vars.sfOppId]'
                 </salesforce:salesforce-query>
-                <salesforce:parameters>
-                    <salesforce:parameter key="sfOppId" value="#[vars.sfOppId]" />
-                </salesforce:parameters>
             </salesforce:query>
 
             <set-variable variableName="opp" value="#[payload[0]]" />
@@ -392,7 +380,7 @@
          Webhook HTTP que recebe criação do frontend CRM Algar
          ═══════════════════════════════════════════════════════════════ -->
     <flow name="crm-algar-create-account-to-sf">
-        <http:listener config-ref="HTTP_Listener_Config" path="/api/crm-algar/account" method="POST" />
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/crm-algar/account" />
 
         <ee:transform>
             <ee:message>
