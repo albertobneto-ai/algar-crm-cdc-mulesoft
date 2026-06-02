@@ -354,7 +354,7 @@
                                 amount: vars.opp.Amount default 0,
                                 probability: vars.opp.Probability default 0,
                                 closeDate: vars.opp.CloseDate,
-                                type: vars.opp.Type,
+                                oppType: vars.opp.Type,
                                 sfId: vars.sfOppId
                             }]
                         </db:input-parameters>
@@ -378,7 +378,7 @@
                                 amount: vars.opp.Amount default 0,
                                 probability: vars.opp.Probability default 0,
                                 closeDate: vars.opp.CloseDate,
-                                type: vars.opp.Type
+                                oppType: vars.opp.Type
                             }]
                         </db:input-parameters>
                     </db:insert>
@@ -412,7 +412,7 @@ payload]]></ee:set-payload>
                 #[[{
                     Name: payload.name,
                     Industry: payload.industry,
-                    Type: payload.type,
+                    'Type': payload.type,
                     BillingCity: payload.city,
                     BillingStateCode: payload.state,
                     BillingCountryCode: 'BR',
