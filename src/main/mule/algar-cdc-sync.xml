@@ -1,0 +1,549 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xmlns:ee="http://www.mulesoft.org/schema/mule/ee/core"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd
+        http://www.mulesoft.org/schema/mule/ee/core http://www.mulesoft.org/schema/mule/ee/core/current/mule-ee.xsd">
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FLOW 1: ACCOUNT CDC — Sales Cloud → CRM Algar → Snowflake
+         Escuta CDC do Account, grava no CRM Algar nativo,
+         ingere no data lake, e faz back-update do Legacy_CRM_Id__c
+         ═══════════════════════════════════════════════════════════════ -->
+    <flow name="account-cdc-sf-to-crm-algar">
+        <!-- CDC Listener: escuta QUALQUER insert/update de Account no SF -->
+        <salesforce:subscribe-channel-listener
+            config-ref="Salesforce_Config"
+            streamingChannel="/data/AccountChangeEvent"
+            replayOption="ONLY_NEW" />
+
+        <logger level="INFO"
+            message="#['[CDC-Account] Evento recebido: ' ++ payload.ChangeEventHeader.changeType ++ ' - IDs: ' ++ payload.ChangeEventHeader.recordIds joinBy ', ']" />
+
+        <!-- Iterar sobre cada registro alterado -->
+        <foreach collection="#[payload.ChangeEventHeader.recordIds]">
+            <set-variable variableName="sfAccountId" value="#[payload]" />
+
+            <!-- Buscar dados completos do Account no SF -->
+            <salesforce:query config-ref="Salesforce_Config">
+                <salesforce:salesforce-query>
+                    SELECT Id, Name, Industry, Type, BillingCity, BillingState,
+                           AnnualRevenue, Legacy_CRM_Id__c
+                    FROM Account WHERE Id = ':sfAccountId'
+                </salesforce:salesforce-query>
+                <salesforce:parameters>
+                    <salesforce:parameter key="sfAccountId" value="#[vars.sfAccountId]" />
+                </salesforce:parameters>
+            </salesforce:query>
+
+            <set-variable variableName="account" value="#[payload[0]]" />
+            <set-variable variableName="crmId"
+                value="#['ACR-' ++ (vars.sfAccountId default '' as String)[-10 to -1]]" />
+
+            <!-- Verificar se já existe no CRM Algar nativo -->
+            <db:select config-ref="Snowflake_Config">
+                <db:sql>
+                    SELECT CRM_ID FROM ALGAR_CRM_NATIVE.ACCOUNTS WHERE SF_ID = :sfId
+                </db:sql>
+                <db:input-parameters>
+                    #[{ sfId: vars.sfAccountId }]
+                </db:input-parameters>
+            </db:select>
+
+            <choice>
+                <!-- UPDATE se já existe -->
+                <when expression="#[sizeOf(payload) > 0]">
+                    <set-variable variableName="crmId" value="#[payload[0].CRM_ID]" />
+                    <db:update config-ref="Snowflake_Config">
+                        <db:sql>
+                            UPDATE ALGAR_CRM_NATIVE.ACCOUNTS SET
+                                NAME = :name, INDUSTRY = :industry, TYPE = :type,
+                                CITY = :city, STATE = :state,
+                                ANNUAL_REVENUE = :revenue,
+                                UPDATED_AT = CURRENT_TIMESTAMP(),
+                                INGESTED_TO_LAKE = FALSE
+                            WHERE SF_ID = :sfId
+                        </db:sql>
+                        <db:input-parameters>
+                            #[{
+                                name: vars.account.Name,
+                                industry: vars.account.Industry,
+                                type: vars.account.Type,
+                                city: vars.account.BillingCity,
+                                state: vars.account.BillingState,
+                                revenue: vars.account.AnnualRevenue default 0,
+                                sfId: vars.sfAccountId
+                            }]
+                        </db:input-parameters>
+                    </db:update>
+                </when>
+                <!-- INSERT se é novo -->
+                <otherwise>
+                    <db:insert config-ref="Snowflake_Config">
+                        <db:sql>
+                            INSERT INTO ALGAR_CRM_NATIVE.ACCOUNTS
+                                (CRM_ID, NAME, CNPJ, INDUSTRY, TYPE, CITY, STATE,
+                                 ANNUAL_REVENUE, SEGMENT, SF_ID, SOURCE_SYSTEM,
+                                 CREATED_AT, UPDATED_AT, INGESTED_TO_LAKE)
+                            VALUES (:crmId, :name, '', :industry, :type, :city, :state,
+                                    :revenue, :segment, :sfId, 'Salesforce',
+                                    CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), FALSE)
+                        </db:sql>
+                        <db:input-parameters>
+                            #[{
+                                crmId: vars.crmId,
+                                name: vars.account.Name,
+                                industry: vars.account.Industry,
+                                type: vars.account.Type,
+                                city: vars.account.BillingCity,
+                                state: vars.account.BillingState,
+                                revenue: vars.account.AnnualRevenue default 0,
+                                segment: if (vars.account.Type == 'Enterprise') 'Large' else 'Medium',
+                                sfId: vars.sfAccountId
+                            }]
+                        </db:input-parameters>
+                    </db:insert>
+                </otherwise>
+            </choice>
+
+            <!-- Ingest to Data Lake (LEGACY_ACCOUNTS) -->
+            <flow-ref name="ingest-to-data-lake" />
+
+            <!-- Back-update SF com Legacy_CRM_Id__c (se ainda não tem) -->
+            <choice>
+                <when expression="#[vars.account.Legacy_CRM_Id__c == null or vars.account.Legacy_CRM_Id__c == '']">
+                    <salesforce:update config-ref="Salesforce_Config" type="Account">
+                        <salesforce:records>
+                            #[[{ Id: vars.sfAccountId, Legacy_CRM_Id__c: vars.crmId }]]
+                        </salesforce:records>
+                    </salesforce:update>
+                    <logger level="INFO"
+                        message="#['[CDC-Account] Back-update SF: ' ++ vars.sfAccountId ++ ' → Legacy_CRM_Id__c = ' ++ vars.crmId]" />
+                </when>
+            </choice>
+
+            <logger level="INFO"
+                message="#['[CDC-Account] Sincronizado: SF=' ++ vars.sfAccountId ++ ' CRM=' ++ vars.crmId]" />
+        </foreach>
+    </flow>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FLOW 2: LEAD CDC — Sales Cloud → Snowflake CRM_LEADS
+         ═══════════════════════════════════════════════════════════════ -->
+    <flow name="lead-cdc-sf-to-snowflake">
+        <salesforce:subscribe-channel-listener
+            config-ref="Salesforce_Config"
+            streamingChannel="/data/LeadChangeEvent"
+            replayOption="ONLY_NEW" />
+
+        <logger level="INFO"
+            message="#['[CDC-Lead] ' ++ payload.ChangeEventHeader.changeType ++ ' - ' ++ payload.ChangeEventHeader.recordIds joinBy ', ']" />
+
+        <foreach collection="#[payload.ChangeEventHeader.recordIds]">
+            <set-variable variableName="sfLeadId" value="#[payload]" />
+
+            <salesforce:query config-ref="Salesforce_Config">
+                <salesforce:salesforce-query>
+                    SELECT Id, FirstName, LastName, Email, Phone,
+                           Company, Title, Status, Rating
+                    FROM Lead WHERE Id = ':sfLeadId'
+                </salesforce:salesforce-query>
+                <salesforce:parameters>
+                    <salesforce:parameter key="sfLeadId" value="#[vars.sfLeadId]" />
+                </salesforce:parameters>
+            </salesforce:query>
+
+            <set-variable variableName="lead" value="#[payload[0]]" />
+
+            <!-- MERGE (upsert) no Snowflake -->
+            <db:select config-ref="Snowflake_Config">
+                <db:sql>SELECT SF_ID FROM CRM_LEADS WHERE SF_ID = :sfId</db:sql>
+                <db:input-parameters>#[{ sfId: vars.sfLeadId }]</db:input-parameters>
+            </db:select>
+
+            <choice>
+                <when expression="#[sizeOf(payload) > 0]">
+                    <db:update config-ref="Snowflake_Config">
+                        <db:sql>
+                            UPDATE CRM_LEADS SET
+                                FIRST_NAME = :firstName, LAST_NAME = :lastName,
+                                EMAIL = :email, PHONE = :phone,
+                                COMPANY = :company, TITLE = :title,
+                                STATUS = :status, RATING = :rating,
+                                LAST_SYNC = CURRENT_TIMESTAMP()
+                            WHERE SF_ID = :sfId
+                        </db:sql>
+                        <db:input-parameters>
+                            #[{
+                                firstName: vars.lead.FirstName,
+                                lastName: vars.lead.LastName,
+                                email: vars.lead.Email,
+                                phone: vars.lead.Phone,
+                                company: vars.lead.Company,
+                                title: vars.lead.Title,
+                                status: vars.lead.Status,
+                                rating: vars.lead.Rating,
+                                sfId: vars.sfLeadId
+                            }]
+                        </db:input-parameters>
+                    </db:update>
+                </when>
+                <otherwise>
+                    <db:insert config-ref="Snowflake_Config">
+                        <db:sql>
+                            INSERT INTO CRM_LEADS
+                                (SF_ID, FIRST_NAME, LAST_NAME, EMAIL, PHONE,
+                                 COMPANY, TITLE, STATUS, RATING, LAST_SYNC)
+                            VALUES (:sfId, :firstName, :lastName, :email, :phone,
+                                    :company, :title, :status, :rating, CURRENT_TIMESTAMP())
+                        </db:sql>
+                        <db:input-parameters>
+                            #[{
+                                sfId: vars.sfLeadId,
+                                firstName: vars.lead.FirstName,
+                                lastName: vars.lead.LastName,
+                                email: vars.lead.Email,
+                                phone: vars.lead.Phone,
+                                company: vars.lead.Company,
+                                title: vars.lead.Title,
+                                status: vars.lead.Status,
+                                rating: vars.lead.Rating
+                            }]
+                        </db:input-parameters>
+                    </db:insert>
+                </otherwise>
+            </choice>
+        </foreach>
+    </flow>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FLOW 3: CONTACT CDC — Sales Cloud → Snowflake CRM_CONTACTS
+         ═══════════════════════════════════════════════════════════════ -->
+    <flow name="contact-cdc-sf-to-snowflake">
+        <salesforce:subscribe-channel-listener
+            config-ref="Salesforce_Config"
+            streamingChannel="/data/ContactChangeEvent"
+            replayOption="ONLY_NEW" />
+
+        <foreach collection="#[payload.ChangeEventHeader.recordIds]">
+            <set-variable variableName="sfContactId" value="#[payload]" />
+
+            <salesforce:query config-ref="Salesforce_Config">
+                <salesforce:salesforce-query>
+                    SELECT Id, FirstName, LastName, Email, Phone,
+                           Title, AccountId, Department
+                    FROM Contact WHERE Id = ':sfContactId'
+                </salesforce:salesforce-query>
+                <salesforce:parameters>
+                    <salesforce:parameter key="sfContactId" value="#[vars.sfContactId]" />
+                </salesforce:parameters>
+            </salesforce:query>
+
+            <set-variable variableName="contact" value="#[payload[0]]" />
+
+            <db:select config-ref="Snowflake_Config">
+                <db:sql>SELECT SF_ID FROM CRM_CONTACTS WHERE SF_ID = :sfId</db:sql>
+                <db:input-parameters>#[{ sfId: vars.sfContactId }]</db:input-parameters>
+            </db:select>
+
+            <choice>
+                <when expression="#[sizeOf(payload) > 0]">
+                    <db:update config-ref="Snowflake_Config">
+                        <db:sql>
+                            UPDATE CRM_CONTACTS SET
+                                FIRST_NAME = :firstName, LAST_NAME = :lastName,
+                                EMAIL = :email, PHONE = :phone, TITLE = :title,
+                                ACCOUNT_ID = :accountId, DEPARTMENT = :department,
+                                LAST_SYNC = CURRENT_TIMESTAMP()
+                            WHERE SF_ID = :sfId
+                        </db:sql>
+                        <db:input-parameters>
+                            #[{
+                                firstName: vars.contact.FirstName,
+                                lastName: vars.contact.LastName,
+                                email: vars.contact.Email,
+                                phone: vars.contact.Phone,
+                                title: vars.contact.Title,
+                                accountId: vars.contact.AccountId,
+                                department: vars.contact.Department,
+                                sfId: vars.sfContactId
+                            }]
+                        </db:input-parameters>
+                    </db:update>
+                </when>
+                <otherwise>
+                    <db:insert config-ref="Snowflake_Config">
+                        <db:sql>
+                            INSERT INTO CRM_CONTACTS
+                                (SF_ID, FIRST_NAME, LAST_NAME, EMAIL, PHONE,
+                                 TITLE, ACCOUNT_ID, DEPARTMENT, LAST_SYNC)
+                            VALUES (:sfId, :firstName, :lastName, :email, :phone,
+                                    :title, :accountId, :department, CURRENT_TIMESTAMP())
+                        </db:sql>
+                        <db:input-parameters>
+                            #[{
+                                sfId: vars.sfContactId,
+                                firstName: vars.contact.FirstName,
+                                lastName: vars.contact.LastName,
+                                email: vars.contact.Email,
+                                phone: vars.contact.Phone,
+                                title: vars.contact.Title,
+                                accountId: vars.contact.AccountId,
+                                department: vars.contact.Department
+                            }]
+                        </db:input-parameters>
+                    </db:insert>
+                </otherwise>
+            </choice>
+        </foreach>
+    </flow>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FLOW 4: OPPORTUNITY CDC — Sales Cloud → Snowflake CRM_OPPORTUNITIES
+         ═══════════════════════════════════════════════════════════════ -->
+    <flow name="opportunity-cdc-sf-to-snowflake">
+        <salesforce:subscribe-channel-listener
+            config-ref="Salesforce_Config"
+            streamingChannel="/data/OpportunityChangeEvent"
+            replayOption="ONLY_NEW" />
+
+        <foreach collection="#[payload.ChangeEventHeader.recordIds]">
+            <set-variable variableName="sfOppId" value="#[payload]" />
+
+            <salesforce:query config-ref="Salesforce_Config">
+                <salesforce:salesforce-query>
+                    SELECT Id, Name, AccountId, StageName, Amount,
+                           Probability, CloseDate, Type
+                    FROM Opportunity WHERE Id = ':sfOppId'
+                </salesforce:salesforce-query>
+                <salesforce:parameters>
+                    <salesforce:parameter key="sfOppId" value="#[vars.sfOppId]" />
+                </salesforce:parameters>
+            </salesforce:query>
+
+            <set-variable variableName="opp" value="#[payload[0]]" />
+
+            <db:select config-ref="Snowflake_Config">
+                <db:sql>SELECT SF_ID FROM CRM_OPPORTUNITIES WHERE SF_ID = :sfId</db:sql>
+                <db:input-parameters>#[{ sfId: vars.sfOppId }]</db:input-parameters>
+            </db:select>
+
+            <choice>
+                <when expression="#[sizeOf(payload) > 0]">
+                    <db:update config-ref="Snowflake_Config">
+                        <db:sql>
+                            UPDATE CRM_OPPORTUNITIES SET
+                                NAME = :name, ACCOUNT_ID = :accountId,
+                                STAGE = :stage, AMOUNT = :amount,
+                                PROBABILITY = :probability, CLOSE_DATE = :closeDate,
+                                TYPE = :type, LAST_SYNC = CURRENT_TIMESTAMP()
+                            WHERE SF_ID = :sfId
+                        </db:sql>
+                        <db:input-parameters>
+                            #[{
+                                name: vars.opp.Name,
+                                accountId: vars.opp.AccountId,
+                                stage: vars.opp.StageName,
+                                amount: vars.opp.Amount default 0,
+                                probability: vars.opp.Probability default 0,
+                                closeDate: vars.opp.CloseDate,
+                                type: vars.opp.Type,
+                                sfId: vars.sfOppId
+                            }]
+                        </db:input-parameters>
+                    </db:update>
+                </when>
+                <otherwise>
+                    <db:insert config-ref="Snowflake_Config">
+                        <db:sql>
+                            INSERT INTO CRM_OPPORTUNITIES
+                                (SF_ID, NAME, ACCOUNT_ID, STAGE, AMOUNT,
+                                 PROBABILITY, CLOSE_DATE, TYPE, LAST_SYNC)
+                            VALUES (:sfId, :name, :accountId, :stage, :amount,
+                                    :probability, :closeDate, :type, CURRENT_TIMESTAMP())
+                        </db:sql>
+                        <db:input-parameters>
+                            #[{
+                                sfId: vars.sfOppId,
+                                name: vars.opp.Name,
+                                accountId: vars.opp.AccountId,
+                                stage: vars.opp.StageName,
+                                amount: vars.opp.Amount default 0,
+                                probability: vars.opp.Probability default 0,
+                                closeDate: vars.opp.CloseDate,
+                                type: vars.opp.Type
+                            }]
+                        </db:input-parameters>
+                    </db:insert>
+                </otherwise>
+            </choice>
+        </foreach>
+    </flow>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         FLOW 5: CRM ALGAR → SALESFORCE (reverso Account)
+         Webhook HTTP que recebe criação do frontend CRM Algar
+         ═══════════════════════════════════════════════════════════════ -->
+    <flow name="crm-algar-create-account-to-sf">
+        <http:listener config-ref="HTTP_Listener_Config" path="/api/crm-algar/account" method="POST" />
+
+        <ee:transform>
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/java
+---
+payload]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+
+        <set-variable variableName="crmId"
+            value="#['ACR-' ++ now() as String {format: 'yyyyMMddHHmm'}]" />
+
+        <!-- Criar Account no Salesforce -->
+        <salesforce:create config-ref="Salesforce_Config" type="Account">
+            <salesforce:records>
+                #[[{
+                    Name: payload.name,
+                    Industry: payload.industry,
+                    Type: payload.type,
+                    BillingCity: payload.city,
+                    BillingStateCode: payload.state,
+                    BillingCountryCode: 'BR',
+                    Legacy_CRM_Id__c: vars.crmId
+                }]]
+            </salesforce:records>
+        </salesforce:create>
+
+        <set-variable variableName="sfAccountId" value="#[payload[0].id]" />
+
+        <!-- Criar no CRM Algar nativo (Snowflake) -->
+        <db:insert config-ref="Snowflake_Config">
+            <db:sql>
+                INSERT INTO ALGAR_CRM_NATIVE.ACCOUNTS
+                    (CRM_ID, NAME, CNPJ, INDUSTRY, TYPE, CITY, STATE,
+                     ANNUAL_REVENUE, SEGMENT, SF_ID, SOURCE_SYSTEM,
+                     CREATED_AT, UPDATED_AT, INGESTED_TO_LAKE)
+                VALUES (:crmId, :name, '', :industry, :type, :city, :state,
+                        :revenue, :segment, :sfId, 'CRM_ALGAR',
+                        CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), FALSE)
+            </db:sql>
+            <db:input-parameters>
+                #[{
+                    crmId: vars.crmId,
+                    name: payload.name default '',
+                    industry: payload.industry default '',
+                    type: payload.type default '',
+                    city: payload.city default '',
+                    state: payload.state default '',
+                    revenue: payload.annual_revenue default 0,
+                    segment: if (payload.type == 'Enterprise') 'Large' else 'Medium',
+                    sfId: vars.sfAccountId
+                }]
+            </db:input-parameters>
+        </db:insert>
+
+        <!-- Ingest to Data Lake -->
+        <flow-ref name="ingest-to-data-lake" />
+
+        <!-- Resposta -->
+        <ee:transform>
+            <ee:message>
+                <ee:set-payload><![CDATA[%dw 2.0
+output application/json
+---
+{
+    status: "ok",
+    sfId: vars.sfAccountId,
+    crmId: vars.crmId,
+    message: "Account criado no SF + CRM Algar + Snowflake"
+}]]></ee:set-payload>
+            </ee:message>
+        </ee:transform>
+    </flow>
+
+    <!-- ═══════════════════════════════════════════════════════════════
+         SUB-FLOW: Ingest CRM Algar → Data Lake (LEGACY_ACCOUNTS)
+         ═══════════════════════════════════════════════════════════════ -->
+    <sub-flow name="ingest-to-data-lake">
+        <db:select config-ref="Snowflake_Config">
+            <db:sql>
+                SELECT CRM_ID, NAME, CNPJ, INDUSTRY, TYPE, CITY, STATE,
+                       ANNUAL_REVENUE, SEGMENT, SF_ID
+                FROM ALGAR_CRM_NATIVE.ACCOUNTS
+                WHERE INGESTED_TO_LAKE = FALSE
+            </db:sql>
+        </db:select>
+
+        <foreach>
+            <set-variable variableName="rec" value="#[payload]" />
+            <set-variable variableName="legacyId"
+                value="#[vars.rec.CRM_ID replace 'ACR-' with 'LEG-']" />
+
+            <db:select config-ref="Snowflake_Config">
+                <db:sql>SELECT LEGACY_ID FROM LEGACY_ACCOUNTS WHERE SF_ID = :sfId</db:sql>
+                <db:input-parameters>#[{ sfId: vars.rec.SF_ID }]</db:input-parameters>
+            </db:select>
+
+            <choice>
+                <when expression="#[sizeOf(payload) > 0]">
+                    <db:update config-ref="Snowflake_Config">
+                        <db:sql>
+                            UPDATE LEGACY_ACCOUNTS SET
+                                NAME = :name, INDUSTRY = :industry, TYPE = :type,
+                                BILLING_CITY = :city, BILLING_STATE = :state,
+                                ANNUAL_REVENUE = :revenue,
+                                SYNC_STATUS = 'SYNCED', LAST_SYNC = CURRENT_TIMESTAMP()
+                            WHERE SF_ID = :sfId
+                        </db:sql>
+                        <db:input-parameters>
+                            #[{
+                                name: vars.rec.NAME, industry: vars.rec.INDUSTRY,
+                                type: vars.rec.TYPE, city: vars.rec.CITY,
+                                state: vars.rec.STATE, revenue: vars.rec.ANNUAL_REVENUE,
+                                sfId: vars.rec.SF_ID
+                            }]
+                        </db:input-parameters>
+                    </db:update>
+                </when>
+                <otherwise>
+                    <db:insert config-ref="Snowflake_Config">
+                        <db:sql>
+                            INSERT INTO LEGACY_ACCOUNTS
+                                (LEGACY_ID, NAME, CNPJ, INDUSTRY, TYPE,
+                                 BILLING_CITY, BILLING_STATE, ANNUAL_REVENUE,
+                                 SEGMENT, LEGACY_SYSTEM, SF_ID, SYNC_STATUS, LAST_SYNC)
+                            VALUES (:legacyId, :name, :cnpj, :industry, :type,
+                                    :city, :state, :revenue, :segment, 'ALGAR_CRM',
+                                    :sfId, 'SYNCED', CURRENT_TIMESTAMP())
+                        </db:sql>
+                        <db:input-parameters>
+                            #[{
+                                legacyId: vars.legacyId, name: vars.rec.NAME,
+                                cnpj: vars.rec.CNPJ, industry: vars.rec.INDUSTRY,
+                                type: vars.rec.TYPE, city: vars.rec.CITY,
+                                state: vars.rec.STATE, revenue: vars.rec.ANNUAL_REVENUE,
+                                segment: vars.rec.SEGMENT, sfId: vars.rec.SF_ID
+                            }]
+                        </db:input-parameters>
+                    </db:insert>
+                </otherwise>
+            </choice>
+
+            <db:update config-ref="Snowflake_Config">
+                <db:sql>
+                    UPDATE ALGAR_CRM_NATIVE.ACCOUNTS
+                    SET INGESTED_TO_LAKE = TRUE WHERE CRM_ID = :crmId
+                </db:sql>
+                <db:input-parameters>#[{ crmId: vars.rec.CRM_ID }]</db:input-parameters>
+            </db:update>
+        </foreach>
+    </sub-flow>
+
+</mule>
