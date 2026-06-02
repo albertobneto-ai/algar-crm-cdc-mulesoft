@@ -412,7 +412,7 @@ payload]]></ee:set-payload>
                 #[[{
                     Name: payload.name,
                     Industry: payload.industry,
-                    'Type': payload.type,
+                    'Type': payload.'type',
                     BillingCity: payload.city,
                     BillingStateCode: payload.state,
                     BillingCountryCode: 'BR',
@@ -439,11 +439,11 @@ payload]]></ee:set-payload>
                     crmId: vars.crmId,
                     name: payload.name default '',
                     industry: payload.industry default '',
-                    accType: payload.type default '',
+                    accType: payload.'type' default '',
                     city: payload.city default '',
                     state: payload.state default '',
                     revenue: payload.annual_revenue default 0,
-                    segment: if (payload.type == 'Enterprise') 'Large' else 'Medium',
+                    segment: if (payload.'type' == 'Enterprise') 'Large' else 'Medium',
                     sfId: vars.sfAccountId
                 }]
             </db:input-parameters>
