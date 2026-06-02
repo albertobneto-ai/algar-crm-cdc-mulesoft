@@ -64,7 +64,7 @@
                     <db:update config-ref="Snowflake_Config">
                         <db:sql>
                             UPDATE ALGAR_CRM_NATIVE.ACCOUNTS SET
-                                NAME = :name, INDUSTRY = :industry, TYPE = :type,
+                                NAME = :name, INDUSTRY = :industry, TYPE = :accType,
                                 CITY = :city, STATE = :state,
                                 ANNUAL_REVENUE = :revenue,
                                 UPDATED_AT = CURRENT_TIMESTAMP(),
@@ -75,7 +75,7 @@
                             #[{
                                 name: vars.account.Name,
                                 industry: vars.account.Industry,
-                                type: vars.account.Type,
+                                accType: vars.account.Type,
                                 city: vars.account.BillingCity,
                                 state: vars.account.BillingState,
                                 revenue: vars.account.AnnualRevenue default 0,
@@ -92,7 +92,7 @@
                                 (CRM_ID, NAME, CNPJ, INDUSTRY, TYPE, CITY, STATE,
                                  ANNUAL_REVENUE, SEGMENT, SF_ID, SOURCE_SYSTEM,
                                  CREATED_AT, UPDATED_AT, INGESTED_TO_LAKE)
-                            VALUES (:crmId, :name, '', :industry, :type, :city, :state,
+                            VALUES (:crmId, :name, '', :industry, :accType, :city, :state,
                                     :revenue, :segment, :sfId, 'Salesforce',
                                     CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), FALSE)
                         </db:sql>
@@ -101,7 +101,7 @@
                                 crmId: vars.crmId,
                                 name: vars.account.Name,
                                 industry: vars.account.Industry,
-                                type: vars.account.Type,
+                                accType: vars.account.Type,
                                 city: vars.account.BillingCity,
                                 state: vars.account.BillingState,
                                 revenue: vars.account.AnnualRevenue default 0,
@@ -343,7 +343,7 @@
                                 NAME = :name, ACCOUNT_ID = :accountId,
                                 STAGE = :stage, AMOUNT = :amount,
                                 PROBABILITY = :probability, CLOSE_DATE = :closeDate,
-                                TYPE = :type, LAST_SYNC = CURRENT_TIMESTAMP()
+                                TYPE = :accType, LAST_SYNC = CURRENT_TIMESTAMP()
                             WHERE SF_ID = :sfId
                         </db:sql>
                         <db:input-parameters>
@@ -367,7 +367,7 @@
                                 (SF_ID, NAME, ACCOUNT_ID, STAGE, AMOUNT,
                                  PROBABILITY, CLOSE_DATE, TYPE, LAST_SYNC)
                             VALUES (:sfId, :name, :accountId, :stage, :amount,
-                                    :probability, :closeDate, :type, CURRENT_TIMESTAMP())
+                                    :probability, :closeDate, :accType, CURRENT_TIMESTAMP())
                         </db:sql>
                         <db:input-parameters>
                             #[{
@@ -430,7 +430,7 @@ payload]]></ee:set-payload>
                     (CRM_ID, NAME, CNPJ, INDUSTRY, TYPE, CITY, STATE,
                      ANNUAL_REVENUE, SEGMENT, SF_ID, SOURCE_SYSTEM,
                      CREATED_AT, UPDATED_AT, INGESTED_TO_LAKE)
-                VALUES (:crmId, :name, '', :industry, :type, :city, :state,
+                VALUES (:crmId, :name, '', :industry, :accType, :city, :state,
                         :revenue, :segment, :sfId, 'CRM_ALGAR',
                         CURRENT_TIMESTAMP(), CURRENT_TIMESTAMP(), FALSE)
             </db:sql>
@@ -439,7 +439,7 @@ payload]]></ee:set-payload>
                     crmId: vars.crmId,
                     name: payload.name default '',
                     industry: payload.industry default '',
-                    type: payload.type default '',
+                    accType: payload.type default '',
                     city: payload.city default '',
                     state: payload.state default '',
                     revenue: payload.annual_revenue default 0,
@@ -496,7 +496,7 @@ output application/json
                     <db:update config-ref="Snowflake_Config">
                         <db:sql>
                             UPDATE LEGACY_ACCOUNTS SET
-                                NAME = :name, INDUSTRY = :industry, TYPE = :type,
+                                NAME = :name, INDUSTRY = :industry, TYPE = :accType,
                                 BILLING_CITY = :city, BILLING_STATE = :state,
                                 ANNUAL_REVENUE = :revenue,
                                 SYNC_STATUS = 'SYNCED', LAST_SYNC = CURRENT_TIMESTAMP()
@@ -505,7 +505,7 @@ output application/json
                         <db:input-parameters>
                             #[{
                                 name: vars.rec.NAME, industry: vars.rec.INDUSTRY,
-                                type: vars.rec.TYPE, city: vars.rec.CITY,
+                                accType: vars.rec.TYPE, city: vars.rec.CITY,
                                 state: vars.rec.STATE, revenue: vars.rec.ANNUAL_REVENUE,
                                 sfId: vars.rec.SF_ID
                             }]
@@ -519,7 +519,7 @@ output application/json
                                 (LEGACY_ID, NAME, CNPJ, INDUSTRY, TYPE,
                                  BILLING_CITY, BILLING_STATE, ANNUAL_REVENUE,
                                  SEGMENT, LEGACY_SYSTEM, SF_ID, SYNC_STATUS, LAST_SYNC)
-                            VALUES (:legacyId, :name, :cnpj, :industry, :type,
+                            VALUES (:legacyId, :name, :cnpj, :industry, :accType,
                                     :city, :state, :revenue, :segment, 'ALGAR_CRM',
                                     :sfId, 'SYNCED', CURRENT_TIMESTAMP())
                         </db:sql>
@@ -527,7 +527,7 @@ output application/json
                             #[{
                                 legacyId: vars.legacyId, name: vars.rec.NAME,
                                 cnpj: vars.rec.CNPJ, industry: vars.rec.INDUSTRY,
-                                type: vars.rec.TYPE, city: vars.rec.CITY,
+                                accType: vars.rec.TYPE, city: vars.rec.CITY,
                                 state: vars.rec.STATE, revenue: vars.rec.ANNUAL_REVENUE,
                                 segment: vars.rec.SEGMENT, sfId: vars.rec.SF_ID
                             }]
