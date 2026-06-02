@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesoft.org/schema/mule/core"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xmlns:salesforce="http://www.mulesoft.org/schema/mule/salesforce"
+      xmlns:db="http://www.mulesoft.org/schema/mule/db"
+      xmlns:http="http://www.mulesoft.org/schema/mule/http"
+      xsi:schemaLocation="
+        http://www.mulesoft.org/schema/mule/core http://www.mulesoft.org/schema/mule/core/current/mule.xsd
+        http://www.mulesoft.org/schema/mule/salesforce http://www.mulesoft.org/schema/mule/salesforce/current/mule-salesforce.xsd
+        http://www.mulesoft.org/schema/mule/db http://www.mulesoft.org/schema/mule/db/current/mule-db.xsd
+        http://www.mulesoft.org/schema/mule/http http://www.mulesoft.org/schema/mule/http/current/mule-http.xsd">
+
+    <!-- ═══════════════════════════════════════
+         SALESFORCE CONNECTOR (Dev Org)
+         CDC listener + CRUD operations
+         ═══════════════════════════════════════ -->
+    <salesforce:sfdc-config name="Salesforce_Config">
+        <salesforce:basic-connection
+            username="${sf.username}"
+            password="${sf.password}"
+            securityToken="${sf.securityToken}"
+            url="${sf.loginUrl}" />
+    </salesforce:sfdc-config>
+
+    <!-- ═══════════════════════════════════════
+         SNOWFLAKE (via JDBC Database Connector)
+         ALGAR_CRM_LAKE — persistência central
+         ═══════════════════════════════════════ -->
+    <db:config name="Snowflake_Config">
+        <db:generic-connection
+            url="jdbc:snowflake://${snowflake.account}.snowflakecomputing.com/?warehouse=${snowflake.warehouse}&amp;db=${snowflake.database}&amp;schema=${snowflake.schema}"
+            driverClassName="net.snowflake.client.jdbc.SnowflakeDriver"
+            user="${snowflake.username}"
+            password="${snowflake.password}" />
+    </db:config>
+
+    <!-- ═══════════════════════════════════════
+         HTTP LISTENER (webhook para CRM Algar UI)
+         Recebe criação de Account do frontend
+         ═══════════════════════════════════════ -->
+    <http:listener-config name="HTTP_Listener_Config">
+        <http:listener-connection host="0.0.0.0" port="${http.port}" />
+    </http:listener-config>
+
+    <!-- ═══════════════════════════════════════
+         HTTP REQUEST (back-update Salesforce)
+         Para atualizar Legacy_CRM_Id__c no SF
+         ═══════════════════════════════════════ -->
+    <http:request-config name="Salesforce_REST_Config">
+        <http:request-connection
+            host="${sf.instanceHost}"
+            port="443"
+            protocol="HTTPS" />
+    </http:request-config>
+
+</mule>
