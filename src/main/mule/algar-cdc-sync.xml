@@ -342,7 +342,7 @@
                                 amount: vars.opp.Amount default 0,
                                 probability: vars.opp.Probability default 0,
                                 closeDate: vars.opp.CloseDate,
-                                oppType: vars.opp.Type,
+                                accType: vars.opp.Type,
                                 sfId: vars.sfOppId
                             }]
                         </db:input-parameters>
@@ -366,7 +366,7 @@
                                 amount: vars.opp.Amount default 0,
                                 probability: vars.opp.Probability default 0,
                                 closeDate: vars.opp.CloseDate,
-                                oppType: vars.opp.Type
+                                accType: vars.opp.Type
                             }]
                         </db:input-parameters>
                     </db:insert>
